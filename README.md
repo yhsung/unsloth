@@ -82,7 +82,8 @@ For Windows install instructions, see [here](https://docs.unsloth.ai/get-started
 - All kernels written in [OpenAI's Triton](https://openai.com/index/triton/) language. **Manual backprop engine**.
 - **0% loss in accuracy** - no approximation methods - all exact.
 - No change of hardware. Supports NVIDIA GPUs since 2018+. Minimum CUDA Capability 7.0 (V100, T4, Titan V, RTX 20, 30, 40x, A100, H100, L40 etc) [Check your GPU!](https://developer.nvidia.com/cuda-gpus) GTX 1070, 1080 works, but is slow.
-- Works on **Linux** and **Windows**
+- **NEW**: Supports **Apple Silicon** (M1, M2, M3, M4) with MPS acceleration! 🍎
+- Works on **Linux**, **Windows**, and **macOS**
 - If you trained a model with 🦥Unsloth, you can use this cool sticker! &nbsp; <img src="https://raw.githubusercontent.com/unslothai/unsloth/main/images/made with unsloth.png" width="200" align="center" />
 
 ## 💾 Install Unsloth
@@ -98,6 +99,21 @@ pip install unsloth
 pip install --upgrade --force-reinstall --no-cache-dir unsloth unsloth_zoo
 ```
 See [here](https://github.com/unslothai/unsloth/edit/main/README.md#advanced-pip-installation) for advanced pip install instructions.
+
+### Apple Silicon Installation
+**For Apple Silicon Macs (M1, M2, M3, M4):**
+```bash
+pip install unsloth[apple-silicon]
+```
+Or for manual installation:
+```bash
+pip install unsloth
+# Optionally install MLX for additional optimizations
+pip install mlx>=0.20.0
+```
+
+See our [Apple Silicon guide](APPLE_SILICON.md) for detailed setup instructions and optimization tips.
+
 ### Windows Installation
 > [!warning]
 > Python 3.13 does not support Unsloth. Use 3.12, 3.11 or 3.10

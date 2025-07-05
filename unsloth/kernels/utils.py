@@ -12,10 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import triton
 import ctypes
 MAX_FUSED_SIZE : int = 65536
-next_power_of_2 = triton.next_power_of_2
 import functools
 from typing import Optional
 from unsloth import DEVICE_TYPE
@@ -39,31 +37,63 @@ pass
 if DEVICE_TYPE == "xpu":
     torch_amp_custom_fwd = torch.amp.custom_fwd(device_type = "xpu")
     torch_amp_custom_bwd = torch.amp.custom_bwd(device_type = "xpu")
+elif DEVICE_TYPE == "mps":
+    # For Apple Silicon, use CPU autocast as MPS doesn't support all autocast operations yet
+    torch_amp_custom_fwd = torch.amp.custom_fwd(device_type = "cpu")
+    torch_amp_custom_bwd = torch.amp.custom_bwd(device_type = "cpu")
 
 
 # tl.math.tanh now is libdevice.tanh
 from packaging.version import Version
-import triton
-import triton.language as tl
-if Version(triton.__version__) >= Version("3.0.0"):
-    if DEVICE_TYPE == "xpu":
-        triton_tanh = tl.extra.intel.libdevice.tanh
+
+# Handle Triton import with Apple Silicon fallback
+try:
+    import triton
+    import triton.language as tl
+    HAS_TRITON = True
+    
+    if Version(triton.__version__) >= Version("3.0.0"):
+        if DEVICE_TYPE == "xpu":
+            triton_tanh = tl.extra.intel.libdevice.tanh
+        else:
+            from triton.language.extra import libdevice
+            triton_tanh = libdevice.tanh
+        triton_cast = tl.cast
     else:
-        from triton.language.extra import libdevice
-        triton_tanh = libdevice.tanh
-    triton_cast = tl.cast
-else:
-    triton_tanh = tl.math.tanh
-    # No casting in old Triton versions
-    @triton.jit
-    def triton_cast(x, dtype):
-        return x.to(dtype)
-    pass
+        triton_tanh = tl.math.tanh
+        # No casting in old Triton versions
+        @triton.jit
+        def triton_cast(x, dtype):
+            return x.to(dtype)
+        pass
+except ImportError:
+    if DEVICE_TYPE == "mps":
+        # Apple Silicon fallback - create minimal mock
+        HAS_TRITON = False
+        
+        # Mock triton functions for Apple Silicon
+        def triton_tanh(x):
+            return torch.tanh(x)
+            
+        def triton_cast(x, dtype):
+            return x.to(dtype)
+            
+        class TritonMock:
+            __version__ = "0.0.0-mps-fallback"
+            next_power_of_2 = lambda x: 1 << (x - 1).bit_length()
+            
+        triton = TritonMock()
+    else:
+        raise ImportError("Triton is required for this device type but not available")
 pass
 
 
 def calculate_settings(n : int) -> (int, int,):
-    BLOCK_SIZE : int = next_power_of_2(n)
+    if HAS_TRITON:
+        BLOCK_SIZE : int = triton.next_power_of_2(n)
+    else:
+        # Fallback implementation for Apple Silicon
+        BLOCK_SIZE : int = 1 << (n - 1).bit_length()
     if BLOCK_SIZE > MAX_FUSED_SIZE:
         raise RuntimeError(f"Cannot launch Triton kernel since n = {n} exceeds "\
                            f"the maximum CUDA blocksize = {MAX_FUSED_SIZE}.")
@@ -75,12 +105,19 @@ def calculate_settings(n : int) -> (int, int,):
 pass
 
 HAS_CUDA_STREAM = False
+HAS_MPS_STREAM = False
 # INTEL GPU specific logic
 if DEVICE_TYPE == "xpu":
     # TODO: Changed here after adding XPU BNB support
     HAS_XPU_STREAM = False
     def get_ptr(x: Optional[torch.Tensor]):
         raise RuntimeError("XPU BNB support is not implemented yet. This function should not be called.")
+elif DEVICE_TYPE == "mps":
+    # Apple Silicon doesn't support bitsandbytes yet
+    HAS_MPS_STREAM = False
+    def get_ptr(x: Optional[torch.Tensor]):
+        # For MPS, we can return the tensor's data pointer directly
+        return x.data_ptr() if x is not None else 0
 else:
     # NVIDIA-GPU logic here as default
     import bitsandbytes as bnb
@@ -93,6 +130,10 @@ if DEVICE_TYPE == "cuda" and torch.cuda.device_count() > 1:
     torch_gpu_device = torch.cuda.device
 elif DEVICE_TYPE == "xpu" and torch.xpu.device_count() > 1:
     torch_gpu_device = torch.xpu.device
+elif DEVICE_TYPE == "mps":
+    # MPS doesn't have multiple devices, use nullcontext
+    from contextlib import nullcontext
+    def torch_gpu_device(device): return nullcontext()
 else:
     from contextlib import nullcontext
     def torch_gpu_device(device): return nullcontext()
@@ -101,6 +142,10 @@ else:
 # INTEL GPU Specific Logic
 if DEVICE_TYPE == "xpu":
     _gpu_getCurrentRawStream = torch._C._xpu_getCurrentRawStream 
+elif DEVICE_TYPE == "mps":
+    # MPS doesn't have raw streams like CUDA, use a dummy function
+    def _gpu_getCurrentRawStream(device_index=0):
+        return 0  # Return dummy stream ID
 # NVIDIA GPU Default Logic
 else:
     _gpu_getCurrentRawStream = torch._C._cuda_getCurrentRawStream
@@ -114,6 +159,7 @@ pass
 # Get array of CUDA streams and other buffers
 global CUDA_STREAMS
 global XPU_STREAMS
+global MPS_STREAMS
 global WEIGHT_BUFFERS
 global ABSMAX_BUFFERS
 
@@ -130,6 +176,11 @@ if DEVICE_TYPE == "xpu":
         XPU_STREAMS[k] = v
     XPU_STREAMS = tuple(XPU_STREAMS)
     del _XPU_STREAMS
+elif DEVICE_TYPE == "mps":
+    # Apple Silicon MPS - only one device
+    MPS_STREAMS = (ctypes.c_void_p(0),)  # Dummy stream for MPS
+    WEIGHT_BUFFERS = [None]
+    ABSMAX_BUFFERS = [None]
 else:
     # NVIDIA GPU Default Logic
     _CUDA_STREAMS = {
@@ -164,6 +215,22 @@ if DEVICE_TYPE == "xpu":
     
     def cgemm_4bit_inference_naive_bf16(*args, **kwargs):
         raise RuntimeError("XPU BNB support is not implemented yet. cgemm_4bit_inference_naive_bf16 should not be called now.")
+elif DEVICE_TYPE == "mps":
+    # Apple Silicon doesn't support bitsandbytes yet, provide fallback implementations
+    def cdequantize_blockwise_fp32(*args, **kwargs):
+        raise RuntimeError("MPS/Apple Silicon doesn't support bitsandbytes quantization yet. Use full precision models.")
+    
+    def cdequantize_blockwise_fp16_nf4(*args, **kwargs):
+        raise RuntimeError("MPS/Apple Silicon doesn't support bitsandbytes quantization yet. Use full precision models.")
+    
+    def cdequantize_blockwise_bf16_nf4(*args, **kwargs):
+        raise RuntimeError("MPS/Apple Silicon doesn't support bitsandbytes quantization yet. Use full precision models.")
+    
+    def cgemm_4bit_inference_naive_fp16(*args, **kwargs):
+        raise RuntimeError("MPS/Apple Silicon doesn't support bitsandbytes quantization yet. Use full precision models.")
+    
+    def cgemm_4bit_inference_naive_bf16(*args, **kwargs):
+        raise RuntimeError("MPS/Apple Silicon doesn't support bitsandbytes quantization yet. Use full precision models.")
 else:
     # NVIDIA GPU Default Logic
     cdequantize_blockwise_fp32      = bnb.functional.lib.cdequantize_blockwise_fp32
@@ -380,6 +447,14 @@ elif DEVICE_TYPE == "cuda" and HAS_CUDA_STREAM:
         is_transposed = (True if W.shape[0] == 1 else False)
         return out.t() if is_transposed else out
     pass
+elif DEVICE_TYPE == "mps":
+    @torch.inference_mode
+    def fast_dequantize(W, quant_state = None, out = None, use_global_buffer = False):
+        if quant_state is None: return W
+        # MPS/Apple Silicon doesn't support quantized weights yet
+        # Return the original weights as-is for now
+        return W
+    pass
 else:
     @torch.inference_mode
     def fast_dequantize(W, quant_state = None, out = None, use_global_buffer = False):
@@ -576,6 +651,11 @@ elif DEVICE_TYPE == "cuda" and HAS_CUDA_STREAM:
         pass
 
         return out
+    pass
+elif DEVICE_TYPE == "mps":
+    def fast_gemv(X, W, quant_state, out = None):
+        # MPS/Apple Silicon fallback - use regular matmul since no quantization support
+        return torch_matmul(X, W, out = out)
     pass
 else:
     def fast_gemv(X, W, quant_state, out = None):
