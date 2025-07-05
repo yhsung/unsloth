@@ -60,6 +60,11 @@ windows=[
     "bitsandbytes>=0.45.5 ; platform_system == 'Windows'",
     "xformers>=0.0.22.post7 ; platform_system == 'Windows'",
 ]
+apple-silicon=[
+    "unsloth[huggingface]",
+    "mlx>=0.20.0 ; platform_system == 'Darwin' and platform_machine == 'arm64'",
+    # Note: bitsandbytes and xformers are not included as they don't support Apple Silicon yet
+]
 cu118only = [
     "xformers @ https://download.pytorch.org/whl/cu118/xformers-0.0.22.post7%2Bcu118-cp39-cp39-manylinux2014_x86_64.whl ; python_version=='3.9' and platform_system == 'Linux'",
     "xformers @ https://download.pytorch.org/whl/cu118/xformers-0.0.22.post7%2Bcu118-cp310-cp310-manylinux2014_x86_64.whl ; python_version=='3.10' and platform_system == 'Linux'",
