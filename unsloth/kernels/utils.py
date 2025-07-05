@@ -12,10 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import triton
 import ctypes
 MAX_FUSED_SIZE : int = 65536
-next_power_of_2 = triton.next_power_of_2
 import functools
 from typing import Optional
 from unsloth import DEVICE_TYPE
@@ -47,27 +45,55 @@ elif DEVICE_TYPE == "mps":
 
 # tl.math.tanh now is libdevice.tanh
 from packaging.version import Version
-import triton
-import triton.language as tl
-if Version(triton.__version__) >= Version("3.0.0"):
-    if DEVICE_TYPE == "xpu":
-        triton_tanh = tl.extra.intel.libdevice.tanh
+
+# Handle Triton import with Apple Silicon fallback
+try:
+    import triton
+    import triton.language as tl
+    HAS_TRITON = True
+    
+    if Version(triton.__version__) >= Version("3.0.0"):
+        if DEVICE_TYPE == "xpu":
+            triton_tanh = tl.extra.intel.libdevice.tanh
+        else:
+            from triton.language.extra import libdevice
+            triton_tanh = libdevice.tanh
+        triton_cast = tl.cast
     else:
-        from triton.language.extra import libdevice
-        triton_tanh = libdevice.tanh
-    triton_cast = tl.cast
-else:
-    triton_tanh = tl.math.tanh
-    # No casting in old Triton versions
-    @triton.jit
-    def triton_cast(x, dtype):
-        return x.to(dtype)
-    pass
+        triton_tanh = tl.math.tanh
+        # No casting in old Triton versions
+        @triton.jit
+        def triton_cast(x, dtype):
+            return x.to(dtype)
+        pass
+except ImportError:
+    if DEVICE_TYPE == "mps":
+        # Apple Silicon fallback - create minimal mock
+        HAS_TRITON = False
+        
+        # Mock triton functions for Apple Silicon
+        def triton_tanh(x):
+            return torch.tanh(x)
+            
+        def triton_cast(x, dtype):
+            return x.to(dtype)
+            
+        class TritonMock:
+            __version__ = "0.0.0-mps-fallback"
+            next_power_of_2 = lambda x: 1 << (x - 1).bit_length()
+            
+        triton = TritonMock()
+    else:
+        raise ImportError("Triton is required for this device type but not available")
 pass
 
 
 def calculate_settings(n : int) -> (int, int,):
-    BLOCK_SIZE : int = next_power_of_2(n)
+    if HAS_TRITON:
+        BLOCK_SIZE : int = triton.next_power_of_2(n)
+    else:
+        # Fallback implementation for Apple Silicon
+        BLOCK_SIZE : int = 1 << (n - 1).bit_length()
     if BLOCK_SIZE > MAX_FUSED_SIZE:
         raise RuntimeError(f"Cannot launch Triton kernel since n = {n} exceeds "\
                            f"the maximum CUDA blocksize = {MAX_FUSED_SIZE}.")
